@@ -1452,6 +1452,7 @@ function providerName(provider: AgentSession['provider']) {
       openCode: 'OpenCode',
       openCode2: 'OpenCode 2',
       grok: 'Grok',
+      jcode: 'Jcode',
       kimi: 'Kimi',
       ohMyPi: 'Oh My Pi',
       pi: 'Pi',

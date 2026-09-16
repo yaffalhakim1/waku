@@ -168,6 +168,7 @@ pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
         | ProviderKind::Copilot
         | ProviderKind::Cursor
         | ProviderKind::Fx
+        | ProviderKind::Jcode
         | ProviderKind::OpenCode
         | ProviderKind::OpenCode2
         | ProviderKind::Grok
@@ -198,6 +199,7 @@ pub fn provider_icon(provider: ProviderKind) -> &'static str {
         ProviderKind::OpenCode => "icons/provider-opencode.svg",
         ProviderKind::OpenCode2 => "icons/provider-opencode2.svg",
         ProviderKind::Grok => "icons/provider-grok.svg",
+        ProviderKind::Jcode => "icons/provider-jcode.svg",
         ProviderKind::Kimi => "icons/provider-kimi.svg",
         ProviderKind::OhMyPi => "icons/provider-ohmypi.svg",
         ProviderKind::Pi => "icons/provider-pi.svg",

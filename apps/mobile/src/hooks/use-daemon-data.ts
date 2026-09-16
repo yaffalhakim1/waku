@@ -43,6 +43,7 @@ export const PROVIDERS: ProviderKind[] = [
   'openCode',
   'openCode2',
   'grok',
+  'jcode',
   'kimi',
   'deepSeek',
   'fx',

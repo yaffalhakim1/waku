@@ -74,6 +74,7 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         ProviderKind::DeepSeek
         | ProviderKind::Fx
         | ProviderKind::Grok
+        | ProviderKind::Jcode
         | ProviderKind::Kimi
         | ProviderKind::OpenCode
         | ProviderKind::OpenCode2

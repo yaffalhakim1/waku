@@ -214,7 +214,7 @@ impl CodexDriver {
             reasoning_effort,
             service_tier,
             context_window: _,
-            agent_preset: _,
+            agent_preset,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -244,6 +244,11 @@ impl CodexDriver {
         let title_cwd = cwd.clone();
         let mut command = crate::command_env::command(&binary);
         command.args(["app-server", "--stdio"]);
+        if let Some(instructions) = agent_preset_instructions(agent_preset.as_deref()) {
+            command
+                .arg("-c")
+                .arg(format!("developer_instructions={}", toml_string(&instructions)));
+        }
         configure_computer_use_command(&mut command, computer_use.as_ref());
         let command = command
             .current_dir(&cwd)
@@ -905,6 +910,59 @@ fn turn_start_params(
 
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("a filesystem path is always valid JSON")
+}
+
+/// Turn the session's selected Codex role into a `developer_instructions`
+/// override, which the app-server takes as a `-c` launch value.
+///
+/// Codex has no per-session agent id on its wire: its subagents are spawned by
+/// the model, not selected by the client. What the picker chooses is therefore
+/// *which role the session should decompose its work as*, and the only channel
+/// that carries that is instructions. The role is read from the user's own
+/// `~/.codex/agents/<name>.toml`, so the text stays theirs to edit.
+///
+/// A role that cannot be resolved adds nothing rather than failing the launch:
+/// a user who deleted the file should get a plain Codex session, not a driver
+/// that refuses to start.
+fn agent_preset_instructions(agent_preset: Option<&str>) -> Option<String> {
+    let name = agent_preset.map(str::trim).filter(|name| !name.is_empty())?;
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))?;
+    let directory = home.join("agents");
+
+    for entry in std::fs::read_dir(&directory).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = contents.parse::<toml::Value>() else {
+            continue;
+        };
+        // `name` is the source of truth, so a file whose name does not match
+        // its `name` field is still found by the field.
+        if parsed.get("name").and_then(toml::Value::as_str).map(str::trim) != Some(name) {
+            continue;
+        }
+        let instructions = parsed
+            .get("developer_instructions")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())?;
+        return Some(instructions.to_owned());
+    }
+
+    // The three built-in roles have no file; describe them the way Codex does.
+    let built_in = match name {
+        "default" => "Act as Codex's general-purpose agent.",
+        "worker" => "Act as Codex's execution-focused agent for implementation and fixes.",
+        "explorer" => "Act as Codex's read-heavy codebase exploration agent.",
+        _ => return None,
+    };
+    Some(built_in.to_owned())
 }
 
 /// `thread/goal/set` params. Omitted fields keep their provider-side value,
@@ -2477,6 +2535,50 @@ fn is_visible_stderr_notice(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The selected role is only useful if its text actually reaches the
+    /// launch, and it must never make a launch fail when the file is gone.
+    #[test]
+    fn agent_preset_resolves_user_files_then_built_ins() {
+        let home = std::env::temp_dir().join(format!("waku-codex-role-{}", Uuid::new_v4()));
+        let agents = home.join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(
+            agents.join("pr-explorer.toml"),
+            r#"
+name = "pr_explorer"
+description = "Read-only explorer."
+developer_instructions = """
+Stay in exploration mode.
+"""
+"#,
+        )
+        .unwrap();
+
+        let previous = std::env::var_os("CODEX_HOME");
+        // SAFETY: this name is unique to this test's temp home.
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+
+        let user = agent_preset_instructions(Some("pr_explorer"));
+        let built_in = agent_preset_instructions(Some("explorer"));
+        let missing = agent_preset_instructions(Some("never_written"));
+        let absent = agent_preset_instructions(None);
+        let blank = agent_preset_instructions(Some("   "));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        assert_eq!(user.as_deref(), Some("Stay in exploration mode."));
+        assert!(built_in.unwrap().contains("exploration"));
+        // Unknown and absent roles leave the session alone instead of failing.
+        assert!(missing.is_none());
+        assert!(absent.is_none());
+        assert!(blank.is_none());
+
+        fs::remove_dir_all(&home).ok();
+    }
 
     #[cfg(unix)]
     #[test]

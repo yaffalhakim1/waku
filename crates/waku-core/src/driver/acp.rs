@@ -97,6 +97,14 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
+        // Jcode exposes an ACP adapter backed by its own daemon, so the whole
+        // session rides the same transport as the other ACP agents. Its model
+        // and provider come from the user's `~/.jcode/config.toml` rather than
+        // a launch flag, so nothing is passed here.
+        ProviderKind::Jcode => Ok(AcpLaunch {
+            args: vec!["acp".into()],
+            env: Vec::new(),
+        }),
         ProviderKind::OpenCode => Ok(AcpLaunch {
             args: vec!["acp".into()],
             env: Vec::new(),

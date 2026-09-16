@@ -108,6 +108,9 @@ pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
         // model the user configured. An invented fallback would offer a model
         // the CLI rejects, so discovery is authoritative.
         ProviderKind::Grok => Vec::new(),
+        // Jcode routes whatever the user's own provider config exposes, so a
+        // fabricated fallback would offer a model the daemon cannot serve.
+        ProviderKind::Jcode => Vec::new(),
         // Pi, Oh My Pi, and Kimi Code all take their catalog from the user's
         // configured LLM providers. A fabricated fallback would make
         // unavailable models look selectable.
@@ -183,7 +186,10 @@ pub fn discover_catalog(
         // Amp exposes stable agent modes rather than a model inventory. Keep
         // the picker aligned with the modes advertised by the current CLI.
         ProviderKind::Amp => (CatalogProbe::legacy(Vec::new()), None),
-        ProviderKind::Codex => (CatalogProbe::legacy(discover_codex_models(binary)), None),
+        ProviderKind::Codex => (
+            CatalogProbe::legacy(discover_codex_models(binary)),
+            discover_codex_agent_presets(),
+        ),
         ProviderKind::Claude => (CatalogProbe::legacy(discover_claude_models(binary)), None),
         ProviderKind::Cursor => (CatalogProbe::legacy(discover_cursor_models(binary)), None),
         ProviderKind::Copilot => (CatalogProbe::legacy(discover_copilot_models(binary)), None),
@@ -198,6 +204,7 @@ pub fn discover_catalog(
             (CatalogProbe::legacy(models), presets)
         }
         ProviderKind::Grok => (CatalogProbe::legacy(discover_grok_models(binary)), None),
+        ProviderKind::Jcode => (CatalogProbe::legacy(discover_jcode_models(binary)), None),
         ProviderKind::Kimi => (CatalogProbe::legacy(discover_kimi_models(binary)), None),
         ProviderKind::Pi => (CatalogProbe::legacy(discover_pi_models(binary, PiDialect::Pi)), None),
         ProviderKind::OhMyPi => {
@@ -351,8 +358,39 @@ fn parse_claude_models(value: &Value) -> Vec<ProviderModel> {
         .collect()
 }
 
-fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {
+/// Jcode publishes every model it can route, one id per line, with no markers
+/// or headers. The list is the daemon's, so it already reflects the user's
+/// configured providers and any model they added by hand.
+fn discover_jcode_models(binary: &Path) -> Vec<ProviderModel> {
     let mut command = crate::command_env::command(binary);
+    let command = command.args(["model", "list"]);
+    let Ok(output) = crate::command_env::output(command) else {
+        return Vec::new();
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_jcode_models(&combined)
+}
+
+fn parse_jcode_models(output: &str) -> Vec<ProviderModel> {
+    let mut models: Vec<ProviderModel> = strip_ansi(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // A failure prints prose rather than a model id; an id never contains
+        // a space, so anything that does is a message we must not show as a
+        // selectable model.
+        .filter(|line| !line.contains(' '))
+        .map(|line| ProviderModel::new(line, line))
+        .collect();
+    models.dedup_by(|a, b| a.id == b.id);
+    models
+}
+
+fn discover_cursor_models(binary: &Path) -> Vec<ProviderModel> {    let mut command = crate::command_env::command(binary);
     let command = command.arg("models");
     let Ok(output) = crate::command_env::output(command) else {
         return Vec::new();
@@ -512,6 +550,89 @@ fn failure_reason_from_parts(code: Option<i32>, stderr: &[u8], stdout: &[u8]) ->
 /// prompt body's `agent` id dispatches against. Prefer an already-resident
 /// server; otherwise start a short-lived one in a neutral directory, because
 /// no project session exists yet at probe time and the agents listing is
+/// The roles Codex spawns its own subagents as, read from the user's own
+/// `~/.codex/agents/*.toml` directory plus Codex's built-ins.
+///
+/// Codex owns this catalogue, not Waku: the files are documented, user-authored
+/// (`name`, `description`, `developer_instructions` are required), and Codex
+/// reloads them per run. So this is a pure filesystem read on the daemon host —
+/// no probe process, no wire call, and nothing to cache, because the catalog is
+/// cheap to rebuild and a stale cache would hide an agent the user just wrote.
+///
+/// `default`, `worker`, and `explorer` ship with Codex. They are always offered,
+/// and a user file that reuses one of those names intentionally overrides it, so
+/// the merge is by name with the user's file winning.
+fn discover_codex_agent_presets() -> Option<Vec<ProviderAgentPreset>> {
+    let mut presets: Vec<ProviderAgentPreset> = Vec::new();
+
+    for (id, description) in CODEX_BUILT_IN_AGENTS {
+        presets.push(ProviderAgentPreset::new(*id, *id).description(*description));
+    }
+
+    // `CODEX_HOME` overrides the location, exactly as it does for Codex itself.
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
+    let Some(directory) = home.map(|home| home.join("agents")) else {
+        return Some(presets);
+    };
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        // A missing directory is the normal case for a user who has written no
+        // roles of their own; the built-ins still stand.
+        return Some(presets);
+    };
+
+    // `read_dir` yields in arbitrary order, so two files claiming one `name`
+    // would otherwise make the picker depend on the filesystem's mood. Sorting
+    // by path makes the first-wins rule deterministic across runs.
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("toml"))
+        .collect();
+    paths.sort();
+
+    let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in paths {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(parsed) = contents.parse::<toml::Value>() else {
+            continue;
+        };
+        // `name` is the source of truth; a file without one is not a custom
+        // agent Codex would load either, so it is skipped rather than guessed
+        // at from the filename.
+        let Some(name) = parsed.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || !claimed.insert(name.to_owned()) {
+            continue;
+        }
+
+        let mut preset = ProviderAgentPreset::new(name, name);
+        preset.is_custom = true;
+        if let Some(description) = parsed.get("description").and_then(toml::Value::as_str) {
+            preset = preset.description(description.trim());
+        }
+        match presets.iter_mut().find(|present| present.id == name) {
+            // The user's file wins over the built-in of the same name.
+            Some(present) => *present = preset,
+            None => presets.push(preset),
+        }
+    }
+
+    Some(presets)
+}
+
+/// The roles every Codex installation exposes without any user configuration.
+const CODEX_BUILT_IN_AGENTS: &[(&str, &str)] = &[
+    ("default", "General-purpose fallback agent."),
+    ("worker", "Execution-focused agent for implementation and fixes."),
+    ("explorer", "Read-heavy codebase exploration agent."),
+];
+
 /// global.
 fn discover_opencode_catalog(
     binary: &Path,
@@ -2118,10 +2239,202 @@ opencode/big-pickle
         assert_eq!(presets[3].description, None);
     }
 
+    /// Writes a `~/.codex/agents` directory under a temp `CODEX_HOME` and
+    /// asserts what the preset discovery makes of it. The env var is process
+    /// global, so this test owns the name it sets and restores it after.
+    #[test]
+    fn codex_agent_presets_come_from_the_users_agent_files() {
+        let home = std::env::temp_dir().join(format!(
+            "waku-codex-agent-test-{}",
+            std::process::id()
+        ));
+        let agents = home.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+
+        std::fs::write(
+            agents.join("pr-explorer.toml"),
+            r#"
+name = "pr_explorer"
+description = "Read-only codebase explorer."
+model = "glm-5-3-flash"
+"#,
+        )
+        .unwrap();
+        // A user file reusing a built-in name replaces that built-in.
+        std::fs::write(
+            agents.join("explorer.toml"),
+            r#"
+name = "explorer"
+description = "House explorer with our own rules."
+"#,
+        )
+        .unwrap();
+        // Skipped: no `name` (the field is the source of truth, not the file).
+        std::fs::write(agents.join("nameless.toml"), "description = \"orphan\"\n").unwrap();
+        // Skipped: not TOML at all.
+        std::fs::write(agents.join("broken.toml"), "this is not = = toml\n").unwrap();
+        // Skipped: not a .toml file.
+        std::fs::write(agents.join("notes.md"), "name = \"should_not_load\"\n").unwrap();
+
+        let previous = std::env::var_os("CODEX_HOME");
+        // SAFETY: test-only, and the name is unique to this test's temp dir.
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+        let presets = discover_codex_agent_presets().unwrap();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        let ids = presets
+            .iter()
+            .map(|preset| preset.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["default", "worker", "explorer", "pr_explorer"]);
+
+        // The built-in survives, carrying the user's description.
+        let explorer = presets.iter().find(|preset| preset.id == "explorer").unwrap();
+        assert_eq!(
+            explorer.description.as_deref(),
+            Some("House explorer with our own rules.")
+        );
+        assert!(explorer.is_custom);
+
+        // The built-ins keep their own text and are not marked custom.
+        let worker = presets.iter().find(|preset| preset.id == "worker").unwrap();
+        assert!(!worker.is_custom);
+
+        let added = presets
+            .iter()
+            .find(|preset| preset.id == "pr_explorer")
+            .unwrap();
+        assert_eq!(
+            added.description.as_deref(),
+            Some("Read-only codebase explorer.")
+        );
+        assert!(added.is_custom);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Two files claiming one `name` must yield exactly one role, and the same
+    /// one on every run: `read_dir` order is arbitrary, so the tie-break has to
+    /// come from the sorted paths rather than from the filesystem.
+    #[test]
+    fn codex_agent_presets_pick_one_winner_per_name() {
+        let home = std::env::temp_dir().join(format!(
+            "waku-codex-dup-home-{}",
+            std::process::id()
+        ));
+        let agents = home.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        // "a.toml" sorts before "b.toml", so it is the deterministic winner.
+        std::fs::write(
+            agents.join("b.toml"),
+            "name = \"twin\"\ndescription = \"from b\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents.join("a.toml"),
+            "name = \"twin\"\ndescription = \"from a\"\n",
+        )
+        .unwrap();
+
+        let previous = std::env::var_os("CODEX_HOME");
+        // SAFETY: test-only, and the name is unique to this test's temp dir.
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+        let first = discover_codex_agent_presets().unwrap();
+        let second = discover_codex_agent_presets().unwrap();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        let twins = |presets: &[ProviderAgentPreset]| {
+            presets
+                .iter()
+                .filter(|preset| preset.id == "twin")
+                .map(|preset| preset.description.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(twins(&first).len(), 1);
+        assert_eq!(twins(&first), twins(&second));
+        assert_eq!(twins(&first)[0].as_deref(), Some("from a"));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A Codex home with no `agents/` directory still offers the built-ins,
+    /// which is the state every fresh installation starts in.
+    #[test]
+    fn codex_agent_presets_fall_back_to_built_ins() {        let home = std::env::temp_dir().join(format!(
+            "waku-codex-empty-home-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+
+        let previous = std::env::var_os("CODEX_HOME");
+        // SAFETY: test-only, and the name is unique to this test's temp dir.
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+        let presets = discover_codex_agent_presets().unwrap();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        assert_eq!(
+            presets
+                .iter()
+                .map(|preset| preset.id.as_str())
+                .collect::<Vec<_>>(),
+            ["default", "worker", "explorer"]
+        );
+        assert!(presets.iter().all(|preset| !preset.is_custom));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Jcode prints one model id per line with no markers or headers, so the
+    /// parser's whole job is to reject anything that is not an id.
+    #[test]
+    fn parses_jcode_models_one_id_per_line() {
+        let models = parse_jcode_models(
+            "\u{1b}[32mglm-5-3-flash\u{1b}[0m\n\
+             claude-opus-5\n\
+             \n\
+             gpt-5.6-pro[web]\n\
+             Error: could not read provider config\n\
+             deepseek-v4-flash\n",
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "glm-5-3-flash",
+                "claude-opus-5",
+                "gpt-5.6-pro[web]",
+                "deepseek-v4-flash"
+            ]
+        );
+    }
+
+    /// The same id twice must not produce two picker entries.
+    #[test]
+    fn jcode_models_are_deduplicated() {
+        let models = parse_jcode_models("glm-5-3-flash\nglm-5-3-flash\nkimi-k2-7-code\n");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["glm-5-3-flash", "kimi-k2-7-code"]
+        );
+    }
+
     #[test]
     #[ignore = "requires an installed DeepSeek Harness"]
-    fn installed_deepseek_harness_reports_models() {
-        let binary =
+    fn installed_deepseek_harness_reports_models() {        let binary =
             crate::command_env::find_executable("dsh").expect("DeepSeek Harness is not installed");
         let models = discover_catalog(ProviderKind::DeepSeek, &binary).0;
         assert!(

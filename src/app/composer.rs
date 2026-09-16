@@ -1692,9 +1692,10 @@ impl Waku {
         // `ProviderKind` copies out of the borrowed session; the menu-open
         // closure below must not borrow `self` when it runs.
         let provider = session.provider;
-        // The catalogue is the session's own provider's: OpenCode publishes
-        // its agents through its server, and only those ids are accepted when
-        // a session starts.
+        // The catalogue is the session's own provider's. OpenCode publishes
+        // its agents through its server and only accepts those ids back; Codex
+        // publishes the roles from the user's `~/.codex/agents/*.toml` and
+        // receives the chosen one as launch instructions rather than an id.
         let presets = self
             .provider_probe(provider)
             .map(|probe| probe.agent_presets.clone())

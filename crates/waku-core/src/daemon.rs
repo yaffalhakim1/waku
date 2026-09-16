@@ -519,7 +519,10 @@ impl Backend for WakuBackend {
                     ProviderKind::Codex => {
                         crate::codex_session::list_provider_sessions(&binary, limit)?
                     }
-                    ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::Copilot => {
+                    ProviderKind::Cursor
+                    | ProviderKind::Fx
+                    | ProviderKind::Jcode
+                    | ProviderKind::Copilot => {
                         crate::acp_session::list_provider_sessions(provider, &binary, &[], limit)?
                     }
                     ProviderKind::OpenCode => {
@@ -612,6 +615,7 @@ impl Backend for WakuBackend {
                     | ProviderResumeCursor::Fx { session_id }
                     | ProviderResumeCursor::Copilot { session_id }
                     | ProviderResumeCursor::Grok { session_id }
+                    | ProviderResumeCursor::Jcode { session_id }
                     | ProviderResumeCursor::Kimi { session_id } => {
                         let provider = cursor.provider();
                         let binary = self.provider_binary(provider)?;
@@ -1308,7 +1312,10 @@ impl WakuBackend {
             }
             // Unreachable through the UI, which hides branching for providers
             // that answer `supports_conversation_fork` with false.
-            ProviderKind::Copilot | ProviderKind::Fx | ProviderKind::Kimi => {
+            ProviderKind::Copilot
+            | ProviderKind::Fx
+            | ProviderKind::Jcode
+            | ProviderKind::Kimi => {
                 bail!(
                     "{} cannot branch a conversation at a turn",
                     source.provider.display_name()
@@ -1535,7 +1542,10 @@ impl WakuBackend {
             )),
             // Unreachable through the UI, which hides rewinding for providers
             // that answer `supports_conversation_rollback` with false.
-            ProviderKind::Copilot | ProviderKind::Fx | ProviderKind::Kimi => {
+            ProviderKind::Copilot
+            | ProviderKind::Fx
+            | ProviderKind::Jcode
+            | ProviderKind::Kimi => {
                 bail!(
                     "{} cannot rewind a conversation to a turn",
                     source.provider.display_name()

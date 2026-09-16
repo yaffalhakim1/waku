@@ -206,12 +206,21 @@ export function MobileComposer({
   const sessionHasStarted =
     session.turns.length > 0 || session.messages.length > 0 || !!session.provider_cursor;
   // Mirrors desktop AgentSession::can_choose_agent_preset: presets are offered
-  // by DeepSeek | OpenCode | OpenCode2, and a started session still qualifies
-  // when the provider can switch a live agent (OpenCode | OpenCode2).
+  // by Codex | DeepSeek | OpenCode | OpenCode2, and a started session still
+  // qualifies when the provider can switch a live agent (OpenCode | OpenCode2).
+  // Codex composes through its own ~/.codex/agents/*.toml directory and has no
+  // live switch, so a started Codex session keeps the role it began with.
+  const presetProvider =
+    session.provider === 'codex'
+    || session.provider === 'deepSeek'
+    || session.provider === 'openCode'
+    || session.provider === 'openCode2';
+  const liveAgentSwitch =
+    session.provider === 'openCode' || session.provider === 'openCode2';
   const supportsAgentPreset =
     !busy
-    && (session.provider === 'deepSeek' || session.provider === 'openCode' || session.provider === 'openCode2')
-    && (!sessionHasStarted || session.provider === 'openCode' || session.provider === 'openCode2');
+    && presetProvider
+    && (!sessionHasStarted || liveAgentSwitch);
   const agentPresetProbe = useProviderModels(supportsAgentPreset ? session.provider : null);
   const taskState = useTaskState();
   const projectPath = taskState.data?.projects.find(

@@ -448,6 +448,16 @@ fn agent_arguments(
             }
             return args;
         }
+        // Jcode's one-shot run prints the answer and exits, so the commit
+        // prompt needs no session, tools, or streaming flags.
+        ProviderKind::Jcode => {
+            push(&mut args, "run");
+            if let Some(model) = model {
+                push(&mut args, "--model");
+                push(&mut args, model);
+            }
+            push(&mut args, prompt);
+        }
         // Oh My Pi rejects unknown flags outright, so it gets its own list
         // rather than Pi's: context files are `--no-rules`, and it has no
         // prompt-template or project-trust switch to turn off.
@@ -897,6 +907,11 @@ mod tests {
                     assert!(has(&args, "--no-memory"));
                     assert!(has(&args, "--no-subagents"));
                     assert!(has_pair(&args, "--reasoning-effort", "low"));
+                }
+                ProviderKind::Jcode => {
+                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("run"));
+                    assert!(has_pair(&args, "--model", "model"));
+                    assert!(has(&args, prompt));
                 }
                 ProviderKind::Pi => {
                     assert!(has(&args, "--print"));

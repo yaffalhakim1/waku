@@ -441,9 +441,13 @@ export default function NewTaskScreen() {
   const providerModels = modelCatalog.find((entry) => entry.id === provider)?.models ?? [];
   const disconnected = daemon.phase !== 'connected';
   // Mirrors desktop AgentSession::can_choose_agent_preset: presets are offered
-  // by DeepSeek | OpenCode | OpenCode2.
+  // by Codex | DeepSeek | OpenCode | OpenCode2. Codex joins them through its
+  // own ~/.codex/agents/*.toml directory rather than a wire catalogue.
   const supportsAgentPreset =
-    provider === 'deepSeek' || provider === 'openCode' || provider === 'openCode2';
+    provider === 'codex' ||
+    provider === 'deepSeek' ||
+    provider === 'openCode' ||
+    provider === 'openCode2';
   const agentPresetProbe = useProviderModels(supportsAgentPreset ? provider : null);
   const agentPresets = agentPresetProbe.data?.agent_presets ?? [];
   const activeModel = model
